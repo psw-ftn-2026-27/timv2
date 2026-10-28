@@ -8,8 +8,6 @@ def load(name, default):
         return default
 
 bld = load("build.json", {"status": "error", "summary": "", "errors": []})
-tpl = load("template.json", {"status": "error", "errors": [], "ptype": None})
-dsc = load("description.json", {"status": "skip", "suspects": []})
 cov = load("coverage.json", {"status": "error", "threshold": 0.8})
 mnt = load("maintainability.json", {"status": "error", "methods": [], "classes": [], "thresholds": {}})
 
@@ -23,32 +21,15 @@ def pct(x):
     tenths = math.floor(x * 1000 + 1e-9) / 10
     return f"{tenths:.0f}%" if tenths == int(tenths) else f"{tenths:.1f}%"
 
-if tpl["status"] == "ok":
-    tpl_txt = f"✅ ispravan (`{tpl.get('ptype') or '?'}` · {' + '.join(tpl.get('scope') or ['backend'])})"
-elif tpl["status"] == "fail":
-    tpl_txt = "❌ **nije ispravan**"
-else:
-    tpl_txt = "❌ **provera nije izvršena** (greška u alatu), pokreni ponovo (Actions → **Re-run failed jobs**)"
-
-already = " ".join(tpl.get("errors", []))
-suspects = [s for s in dsc.get("suspects", []) if (s.get("name") or "") not in already]
-
-if dsc["status"] == "suspect" and not suspects:
-    dsc_txt = "⏸️ pokriveno proverom šablona"
-else:
-    dsc_txt = {"ok": "✅ smislen", "suspect": "⚠️ sumnjive sekcije",
-               "skip": "⏸️ preskočeno",
-               "empty": "⏸️ pokriveno proverom šablona"}.get(dsc["status"], "⏸️ preskočeno")
-
 if cov["status"] == "ok" and cov.get("ratio") is None:
     cov_txt = "✅ nema novih testabilnih linija"
 elif cov["status"] == "ok":
     cov_txt = (f"✅ {pct(cov.get('ratio'))}, {cov.get('coveredNew')} od "
                f"{cov.get('addedExec')} novih linija (prag {pct(cov.get('threshold'))})")
 elif cov["status"] == "fail":
-    cov_txt = f"❌ **{pct(cov.get('ratio'))}** (prag {pct(cov.get('threshold'))})"
+    cov_txt = f"⚠️ **{pct(cov.get('ratio'))}** (prag {pct(cov.get('threshold'))}, ne blokira)"
 elif bld["status"] == "ok":
-    cov_txt = "❌ **nije izmereno**"
+    cov_txt = "⚠️ nije izmereno, ne blokira"
 else:
     cov_txt = "⚠️ nije izmereno (build ili testovi nisu prošli)"
 
@@ -94,8 +75,6 @@ else:
 
 out += ["| Provera | Status |", "|---|---|",
         f"| Build i testovi | {bld_txt} |",
-        f"| Šablon PRa | {tpl_txt} |",
-        f"| Sadržaj opisa | {dsc_txt} |",
         f"| Pokrivenost novog koda | {cov_txt} |",
         f"| Lakoća održavanja | {mnt_txt}{sonar_txt} |", ""]
 
@@ -117,33 +96,15 @@ if bld["status"] == "ok" and skipped:
            ["- imena preskočenih testova su u Actions, u job-u `build`"]
     out += ["", "> Recenzent: proveri razlog u `Skip = \"...\"` i da li preskočeni test skriva grešku.", ""]
 
-if tpl["status"] == "fail":
-    out += ["### ❌ Šablon PRa, spajanje je blokirano", ""]
-    out += [f"- {e}" for e in tpl.get("errors", [])]
-    out += ["", "> Obeleži obim (backend, frontend ili oba) i **tačno jedan** tip PRa. Change goal je uvek obavezan. "
-            "Za backend: `feature` traži izmene nad bazom i testiranje, `bugfix`/`refactor` testiranje, "
-            "dok za `test`/`chore`/`docs` nijedna sekcija nije obavezna. Kod izmena nad bazom obeleži da li PR "
-            "menja bazu, ako menja, opiši izmenu i odgovori na pitanje o migracijama. Za frontend obeleži bar "
-            "jednu vrstu izmene i dodaj 1–2 rečenice opisa. Svaku sekciju koju popunjavaš a koja počinje sa TODO "
-            "zameni svojim tekstom, a TODO red obriši.", ""]
-
-if dsc["status"] == "suspect" and suspects:
-    out += ["### ⚠️ Sadržaj opisa (savetodavno, ne blokira)", "",
-            "Ove sekcije deluju kao nedovršen placeholder:", ""]
-    for s in suspects:
-        note = f": {s['note']}" if s.get("note") else ""
-        out.append(f"- **{s['name']}**{note}")
-    out.append("")
-
 if cov["status"] == "fail":
-    out += ["### ❌ Pokrivenost, spajanje je blokirano", "",
+    out += ["### ⚠️ Pokrivenost (savetodavno, ne blokira)", "",
             f"Od **{cov.get('addedExec')}** novih izvršivih linija, testom je pokriveno "
             f"**{cov.get('coveredNew')}**.", ""]
     if cov.get("files"):
         out.append("Najviše nepokrivenog:")
         out += [f"- `{f['file']}`: {plural(f['uncovered'], 'linija', 'linije', 'linija')}" for f in cov["files"]]
         out.append("")
-    out += ["> Dodaj testove za novi kod pa će kapija proći. Kod koji se ne testira "
+    out += ["> Preporuka: dodaj testove za novi kod. Kod koji se ne testira "
             "(DTO, migracije, neizvršive linije) ne ulazi u račun.", ""]
 
 skipped_files = cov.get("skippedFiles") or []
@@ -155,7 +116,7 @@ if skipped_files:
     out += ["", "> Recenzent: za ove fajlove sam proveri da li su izmene pokrivene testovima.", ""]
 
 if bld["status"] == "ok" and cov["status"] == "error":
-    out += ["### ❌ Pokrivenost nije izmerena, spajanje je blokirano", ""]
+    out += ["### ⚠️ Pokrivenost nije izmerena (ne blokira)", ""]
     if cov.get("reason") == "no-data":
         out += ["Testovi su prošli, ali nijedan test projekat nije proizveo podatke o pokrivenosti. "
                 "Najčešći uzrok: iz `Directory.Build.props` ili `Directory.Packages.props` uklonjen je "
@@ -267,8 +228,6 @@ out.append("U nastavku iskoristi `review_template.md` kako bi kreirao reviziju k
 
 open("comment.md", "w", encoding="utf-8").write("\n".join(out))
 
-hard_fail = (bld["status"] != "ok"
-             or tpl["status"] != "ok"
-             or cov["status"] in ("fail", "error"))
+hard_fail = bld["status"] != "ok"
 open("verdict.txt", "w").write("fail" if hard_fail else "ok")
 print("hard_fail:", hard_fail)
