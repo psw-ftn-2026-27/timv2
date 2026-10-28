@@ -1,0 +1,202 @@
+name: pr-checks
+
+# Provere pri otvaranju i izmeni PRa. Svaki job upisuje rezultat u JSON artefakt, a job report
+# od svih sastavlja jedan komentar na PRu.
+#
+#   build           TVRDA   rešenje se prevodi i svi testovi prolaze
+#   coverage        MEKA    pokrivenost novih izvršivih linija, samo izveštaj
+#   maintainability MEKA    naš analizator (TT001–TT009) na dirnutom kodu
+#
+# Šablon opisa PRa i LLM provera opisa se ovde ne proveravaju.
+# PR prema main (development u main) se ovde ne proverava; build i testove za njega radi ci.yml.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  SCRIPTS: _ci/.github/scripts
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: _ci
+          sparse-checkout: /.github/
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Build and test
+        run: bash "$SCRIPTS/pr-checks/build_and_test.sh"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: part-build
+          path: build.json
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: cov-raw
+          path: cov-raw
+          if-no-files-found: ignore
+
+      - name: Fail if build or tests broken
+        run: python3 "$SCRIPTS/common/require.py" build.json --ok ok
+
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: _ci
+          sparse-checkout: /.github/
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: cov-raw
+          path: cov-raw
+
+      - name: Aggregate cobertura
+        continue-on-error: true
+        run: bash "$SCRIPTS/common/aggregate_coverage.sh" cov-raw cov-sum Cobertura
+
+      - name: Diff coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: bash "$SCRIPTS/pr-checks/diff_coverage.sh"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: part-coverage
+          path: coverage.json
+
+  maintainability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: _ci
+          sparse-checkout: /.github/
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Roslyn metrics
+        continue-on-error: true
+        run: bash .github/analyzers/measure.sh "$PWD" "$PWD/maintainability-report.json"
+
+      - name: Keep only touched code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: bash "$SCRIPTS/pr-checks/touched_maintainability.sh"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: part-maintainability
+          path: maintainability.json
+
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [build, coverage, maintainability]
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: _ci
+          sparse-checkout: /.github/
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts
+          merge-multiple: true
+
+      - name: Compose comment
+        env:
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 "$SCRIPTS/pr-checks/compose_comment.py"
+
+      - name: Post comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: bash "$SCRIPTS/pr-checks/post_comment.sh"
+
+      - name: Fail if a hard gate failed
+        run: python3 "$SCRIPTS/common/require.py" verdict.txt --ok ok
